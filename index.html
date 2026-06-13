@@ -79,6 +79,26 @@
     #install-btn { background: var(--gold); color: #080c18; border: none; border-radius: 8px; padding: 7px 14px; font-weight: 700; font-size: 13px; cursor: pointer; white-space: nowrap; font-family: inherit; }
     #install-dismiss { background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; margin-left: auto; line-height: 1; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+
+    /* AI Team Detail */
+    .ai-block { background: var(--surface2); border: 1px solid var(--border2); border-radius: 12px; padding: 14px; margin-bottom: 10px; }
+    .ai-block-title { font-size: 11px; font-weight: 700; letter-spacing: 1px; color: var(--gold); text-transform: uppercase; margin-bottom: 10px; }
+    .captain-row { display: flex; align-items: center; gap: 12px; }
+    .captain-badge { font-size: 32px; }
+    .captain-name { font-weight: 700; font-size: 15px; color: #fff; }
+    .captain-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .player-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .player-chip { background: #0e1422; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; }
+    .player-pos { font-size: 9px; font-weight: 700; letter-spacing: .8px; color: var(--muted2); text-transform: uppercase; }
+    .player-name { font-size: 12px; font-weight: 600; color: #d0dcff; margin-top: 1px; line-height: 1.2; }
+    .fact-item { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+    .fact-item:last-child { border-bottom: none; padding-bottom: 0; }
+    .fact-emoji { font-size: 18px; flex-shrink: 0; }
+    .fact-text { font-size: 12.5px; color: #a0b4d0; line-height: 1.5; }
+    .ai-loading { text-align: center; padding: 30px 16px; color: var(--muted); }
+    .spinner { display: inline-block; width: 24px; height: 24px; border: 2px solid #1a2540; border-top-color: var(--gold); border-radius: 50%; animation: spin .7s linear infinite; margin-bottom: 10px; }
+    .ai-error { text-align: center; padding: 20px; color: #e63946; font-size: 12px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -223,8 +243,15 @@ const MATCHES=[
 
 let view="today",selGroup=null,selTeam=null,searchVal="";
 
-function todayStr(){return new Date().toISOString().slice(0,10);}
-function fmtDate(ds){return new Date(ds+"T12:00:00").toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});}
+// Always derive the current date in Central Time (CDT/CST = America/Chicago)
+function todayStr(){
+  return new Date().toLocaleDateString("en-CA",{timeZone:"America/Chicago"});
+  // en-CA gives YYYY-MM-DD format
+}
+function fmtDate(ds){
+  // Parse as noon CT to avoid any midnight boundary drift
+  return new Date(ds+"T12:00:00").toLocaleDateString("en-US",{timeZone:"America/Chicago",weekday:"short",month:"short",day:"numeric"});
+}
 function byDate(list){const m={};for(const x of list){if(!m[x.date])m[x.date]=[];m[x.date].push(x);}return m;}
 function teamGroup(n){return Object.entries(GROUPS).find(([,v])=>v.includes(n))?.[0]||"?";}
 
@@ -270,8 +297,18 @@ function render(){
     c.querySelectorAll(".team-row").forEach(b=>b.onclick=()=>{selTeam=b.dataset.team;render();});
   } else if(view==="teams"&&selTeam){
     const tm=MATCHES.filter(m=>m.home===selTeam||m.away===selTeam);
-    c.innerHTML=`<button class="back-btn" id="back">‹ Back · ${selTeam}</button><div class="team-hero"><div class="team-hero-flag">${FLAGS[selTeam]||"🏳️"}</div><div class="team-hero-name">${selTeam}</div><div class="team-hero-grp">Group ${teamGroup(selTeam)}</div></div><div class="label">All Fixtures</div>${tm.map(m=>cardHTML(m)).join("")}`;
+    c.innerHTML=`
+      <button class="back-btn" id="back">‹ Back · ${selTeam}</button>
+      <div class="team-hero">
+        <div class="team-hero-flag">${FLAGS[selTeam]||"🏳️"}</div>
+        <div class="team-hero-name">${selTeam}</div>
+        <div class="team-hero-grp">Group ${teamGroup(selTeam)}</div>
+      </div>
+      <div id="ai-zone"><div class="ai-loading"><div class="spinner"></div><br>Loading squad & facts…</div></div>
+      <div class="label mt">Fixtures</div>
+      ${tm.map(m=>cardHTML(m)).join("")}`;
     document.getElementById("back").onclick=()=>{selTeam=null;searchVal="";render();};
+    loadTeamAI(selTeam);
   }
 }
 
@@ -283,6 +320,112 @@ document.querySelectorAll(".nav-btn").forEach(b=>{
   };
 });
 render();
+
+// ── AI TEAM DATA ─────────────────────────────────────────────────────────────
+const teamCache = {};
+
+async function loadTeamAI(team) {
+  const zone = document.getElementById("ai-zone");
+  if (!zone) return;
+
+  // Return cached result instantly
+  if (teamCache[team]) {
+    zone.innerHTML = renderTeamAI(teamCache[team]);
+    return;
+  }
+
+  try {
+    const prompt = `You are a FIFA World Cup 2026 expert. For the national team "${team}", return ONLY a JSON object with this exact structure (no markdown, no explanation):
+{
+  "captain": { "name": "Full Name", "club": "Club Name", "age": 28 },
+  "squad": [
+    { "pos": "GK", "name": "Full Name" },
+    { "pos": "GK", "name": "Full Name" },
+    { "pos": "DEF", "name": "Full Name" },
+    { "pos": "DEF", "name": "Full Name" },
+    { "pos": "DEF", "name": "Full Name" },
+    { "pos": "DEF", "name": "Full Name" },
+    { "pos": "MID", "name": "Full Name" },
+    { "pos": "MID", "name": "Full Name" },
+    { "pos": "MID", "name": "Full Name" },
+    { "pos": "MID", "name": "Full Name" },
+    { "pos": "FWD", "name": "Full Name" },
+    { "pos": "FWD", "name": "Full Name" },
+    { "pos": "FWD", "name": "Full Name" }
+  ],
+  "facts": [
+    { "emoji": "🏆", "text": "One interesting fact about the team's World Cup history" },
+    { "emoji": "⭐", "text": "One fact about the team's star player or playing style" },
+    { "emoji": "🌍", "text": "One interesting fact about the country itself" },
+    { "emoji": "📊", "text": "One fact about their FIFA ranking or recent form" }
+  ]
+}`;
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+
+    const data = await res.json();
+    const text = data.content?.find(b => b.type === "text")?.text || "";
+    // Strip any markdown fences just in case
+    const clean = text.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+    teamCache[team] = parsed;
+
+    const zone2 = document.getElementById("ai-zone");
+    if (zone2) zone2.innerHTML = renderTeamAI(parsed);
+
+  } catch(e) {
+    const zone2 = document.getElementById("ai-zone");
+    if (zone2) zone2.innerHTML = `<div class="ai-error">⚠️ Could not load team data. Check connection.</div>`;
+  }
+}
+
+function renderTeamAI(d) {
+  const posColors = { GK:"#e9c46a", DEF:"#2a9d8f", MID:"#4895ef", FWD:"#e63946" };
+
+  const captainHTML = `
+    <div class="ai-block">
+      <div class="ai-block-title">👑 Captain</div>
+      <div class="captain-row">
+        <div class="captain-badge">🪖</div>
+        <div>
+          <div class="captain-name">${d.captain.name}</div>
+          <div class="captain-sub">${d.captain.club} · Age ${d.captain.age}</div>
+        </div>
+      </div>
+    </div>`;
+
+  const squadHTML = `
+    <div class="ai-block">
+      <div class="ai-block-title">👕 Squad</div>
+      <div class="player-grid">
+        ${d.squad.map(p => `
+          <div class="player-chip">
+            <div class="player-pos" style="color:${posColors[p.pos]||"#5a6a99"}">${p.pos}</div>
+            <div class="player-name">${p.name}</div>
+          </div>`).join("")}
+      </div>
+    </div>`;
+
+  const factsHTML = `
+    <div class="ai-block">
+      <div class="ai-block-title">💡 Did You Know?</div>
+      ${d.facts.map(f => `
+        <div class="fact-item">
+          <span class="fact-emoji">${f.emoji}</span>
+          <span class="fact-text">${f.text}</span>
+        </div>`).join("")}
+    </div>`;
+
+  return captainHTML + squadHTML + factsHTML;
+}
 
 // PWA install prompt
 let dp;
